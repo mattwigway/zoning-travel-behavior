@@ -1,0 +1,146 @@
+# db etc are specified at top level
+tasks:
+  - name: main
+    depends_on: [compute-buildable-areas]
+
+  - name: download-osm
+    commands:
+      - type: sh
+        code: curl -o "/Volumes/Pheasant Ridge/osm/socal_osm/socal.osm.pbf" https://download.geofabrik.de/north-america/us/california/socal-latest.osm.pbf
+    outputs:
+      - file: /Volumes/Pheasant Ridge/osm/socal_osm/socal.osm.pbf
+
+  - name: load-osm-to-database
+    commands:
+      # set up the schema
+      - type: sql
+        file: pgsnapshot_schema_0.6.sql
+      # load the data
+      - type: sh
+        code: osmosis --read-pbf "/Volumes/Pheasant Ridge/osm/socal_osm/socal.osm.pbf" --write-pgsql database=matthewc postgresSchema=diss
+    depends_on: download-osm
+    outputs:
+      - table: diss.users
+      - table: diss.nodes
+      - table: diss.ways
+      - table: diss.way_nodes
+      - table: diss.relations
+      - table: diss.relation_members
+      - table: diss.schema_info
+
+  # Create an OSM network that has all the attributes we need, but with separate line features for each street segment
+  - name: create-noded-osm-network
+    depends_on: load-osm-to-database
+    commands:
+      - type: sql
+        file: create_noded_osm_network.sql
+    outputs:
+      - table: diss.osm_segments
+
+  # Download the MS Buildings database
+  - name: download-buildings
+    commands:
+      - type: sh
+        code: |
+          curl -o "/Volumes/Pheasant Ridge/microsoft_buildings/California.zip" https://usbuildingdata.blob.core.windows.net/usbuildings-v1-1/California.zip
+          unzip "/Volumes/Pheasant Ridge/microsoft_buildings/California.zip" California.geojson -d "/Volumes/Pheasant Ridge/microsoft_buildings/"
+    outputs:
+      - file: "/Volumes/Pheasant Ridge/microsoft_buildings/California.geojson"
+
+  # Load the MS Buildings database into Postgres
+  - name: load-buildings
+    depends_on: download-buildings
+    commands:
+      - type: sh
+        # hardcoded because conda ogr2ogr is incompatible with Postgres 12
+        code: /usr/local/bin/ogr2ogr -f PostgreSQL "PG:dbname=matthewc user=matthewc" "/Volumes/Pheasant Ridge/microsoft_buildings/California.geojson" -nln diss.buildings
+      - type: sql
+        code: |
+          ALTER TABLE diss.buildings ALTER COLUMN wkb_geometry TYPE geography;
+          DROP INDEX IF EXISTS diss.buildings_wkb_geometry_geom_idx;
+          ALTER TABLE diss.buildings RENAME COLUMN wkb_geometry TO geog;
+          CREATE INDEX buildings_geog_idx ON diss.buildings USING GIST (geog);
+    outputs:
+      - table: diss.buildings
+
+  # The parcel zoning database was loaded before sqmake existed, so it was loaded manually. This is a dummy task.
+  - name: load-gp16
+    outputs:
+      - table: diss.gp16
+
+  # assign each building to a parcel
+  - name: assign-buildings-to-parcels
+    depends_on: [load-gp16, load-buildings]
+    commands:
+      - type: sql
+        file: assign_buildings_to_parcels.sql
+    outputs:
+      - column: parcel_gid
+        table: diss.buildings
+
+  # assign each parcel to a street
+  - name: assign-parcels-to-streets
+    depends_on: [load-gp16, create-noded-osm-network]
+    commands:
+      - type: sql
+        file: assign_parcels_to_streets.sql
+    outputs:
+      - column: way_id
+        table: diss.gp16
+      - column: seg_id
+        table: diss.gp16
+
+  # compute the setbacks of each building from the street
+  - name: building-street-distance
+    depends_on: [assign-buildings-to-parcels]
+    commands:
+      - type: sql
+        file: building_street_distance.sql
+    outputs:
+      - table: diss.building_segment_distance
+
+  # compute the setbacks of each parcel from the street
+  - name: parcel-street-distance
+    depends_on: [building-street-distance]
+    commands:
+      - type: sql
+        file: parcel_street_distance.sql
+    outputs:
+      - table: diss.parcel_segment_distance
+
+  # compute the setback for each street segment
+  - name: compute-street-setbacks
+    depends_on: [parcel-street-distance, create-noded-osm-network]
+    commands:
+      - type: sql
+        file: compute_street_setbacks.sql
+    outputs:
+      - column: median_setback_meters
+        table: diss.osm_segments
+
+  # create the setback buffers around each street
+  - name: compute-street-buffers-unindexed
+    depends_on: [compute-street-setbacks]
+    commands:
+      - type: sql
+        file: compute_street_buffers.sql
+    outputs:
+      - table: diss.setback_buffers
+
+  # for some reason the server segfaults if the index is created in the same transaction as the table
+  - name: compute-street-buffers
+    depends_on: [compute-street-buffers-unindexed]
+    commands:
+      - type: sql
+        code: CREATE INDEX setback_buffers_gix ON diss.setback_buffers USING GIST (geog);
+    outputs:
+      - table: diss.setback_buffers # should be okay to duplicate as this will be called if the table doesn't exist, and its upstream dependency will be called before table is created
+
+  # compute the buildable areas on each parcel
+  - name: compute-buildable-areas
+    depends_on: [compute-street-buffers]
+    commands:
+      - type: sql
+        file: compute_buildable_areas.sql
+    outputs:
+      - table: diss.buildable_areas

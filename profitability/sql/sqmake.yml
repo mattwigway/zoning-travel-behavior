@@ -1,0 +1,37 @@
+# SQMake file to load and process data for the construction model
+
+db: postgresql://matthewc@localhost:5432/matthewc
+schema: diss
+tasks:
+  - name: setbacks
+    depends_on: [setbacks/main]
+  - name: building-fit-base
+    depends_on: [setbacks]
+    commands:
+      - type: sh
+        code: python ../polygon-polygon-test/polygon_polygon_test.py
+    outputs:
+      - file: dim_fit.csv
+  - name: building-fit
+    depends_on: [building-fit-base]
+    commands:
+      - type: data
+        file: dim_fit.csv
+        table: diss.building_fit
+        init_code: |
+          DROP TABLE IF EXISTS diss.building_fit CASCADE;
+          CREATE TABLE diss.building_fit (gid integer PRIMARY KEY, apn VARCHAR, fit_sfh_duplex BOOL, fit_fourplex BOOL, fit_sixplex BOOL);
+        cleanup_code: CREATE INDEX building_fit_apn_idx ON diss.building_fit (apn);
+    outputs:
+      - table: diss.building_fit
+
+  - name: costs
+    depends_on: [costs/building-costs]
+
+includes:
+  - name: setbacks
+    file: setbacks/sqmake.yml
+  - name: costs
+    file: costs/sqmake.yml
+  - name: transactions
+    file: transactions/sqmake.yml

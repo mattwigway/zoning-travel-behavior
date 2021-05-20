@@ -1,0 +1,164 @@
+# Construction cost computation
+
+tasks:
+  # read the RSMeans cost estimates from Excel, put them in the database
+  - name: cost-estimates
+    commands:
+      - type: data
+        # This Excel file comes from RSMeans estimates. Due to data licensing, it cannot be redistributed.
+        file: ../../costs.xlsx
+        init_code: |
+          CREATE TABLE diss.construction_cost (
+            name VARCHAR PRIMARY KEY,
+            units INTEGER NOT NULL,
+            footprint_x INTEGER NOT NULL,
+            footprint_y INTEGER NOT NULL,
+            perimeter INTEGER NOT NULL,
+            perimeter_feet REAL NOT NULL, -- not gonna be using this, real is fine
+            stories INTEGER NOT NULL,
+            floor_area_sf REAL NOT NULL,
+            quality VARCHAR,
+            frame VARCHAR NOT NULL,
+            beds VARCHAR NOT NULL,
+            baths VARCHAR NOT NULL,
+            garage INTEGER NOT NULL,
+            cost_type VARCHAR NOT NULL,
+            cost DOUBLE PRECISION NOT NULL,
+            per_unit_cost DOUBLE PRECISION NOT NULL,
+            parking_cost DOUBLE PRECISION NOT NULL,
+            impact_fee DOUBLE PRECISION NOT NULL,
+            arch_cost DOUBLE PRECISION NOT NULL,
+            total_fixed_cost DOUBLE PRECISION NOT NULL
+          )
+        table: diss.construction_cost
+    outputs:
+      - table: diss.construction_cost
+
+  - name: building-costs
+    depends_on: [cost-estimates, assign-gp16-to-pumas, add-hqta-to-gp16, add-tract-to-gp16, copy-zasmt-to-gp16]
+    commands:
+      - type: sql
+        file: construction-costs.sql
+    outputs:
+      - table: diss.building_costs
+
+  - name: la-assessor-download
+    commands:
+      - type: sh
+        code: curl -o ../../data/assessor_parcels_la.csv "https://data.lacounty.gov/api/views/7rjj-f2pv/rows.csv?accessType=DOWNLOAD"
+    outputs:
+      - file: ../../data/assessor_parcels_la.csv
+
+  - name: assign-gp16-to-pumas
+    depends_on: [setbacks/load-gp16]
+    commands:
+      - type: sql
+        file: assign-gp16-to-puma.sql
+    outputs:
+      - table: diss.gp16
+        column: puma
+
+  - name: zasmt
+    desc: Load ZAsmt data to database (expects a ZTraxDB sqlite file on an external hard drive)
+    commands:
+      - type: sh
+        code: python zasmt-to-postgres.py
+      - type: sql
+        code: CREATE INDEX zasmt_apn_ix ON diss.zasmt (Main_AssessorParcelNumber);
+    outputs:
+      - table: diss.zasmt
+
+  - name: clean-apns
+    desc: Clean APNs so they match between datasets, including Ventura APN suffixes (https://assessor.countyofventura.org/pdfs/APN%20Instructions.pdf)
+    depends_on: [zasmt, setbacks/load-gp16]
+    commands:
+      - type: sql
+        file: clean-apn.sql
+    outputs:
+      - table: diss.gp16
+        column: clean_apn
+      - table: diss.zasmt
+        column: clean_apn
+      - table: diss.zasmt
+        column: ventura_apn_suffix
+
+  - name: copy-zasmt-to-gp16
+    desc: Copy relevant columns of existing structures from ZAsmt to GP16
+    depends_on: [clean-apns]
+    commands:
+      - type: sql
+        file: copy-zasmt-to-gp16.sql
+    outputs:
+      - table: diss.gp16
+        column: building_yearbuilt
+      - table: diss.gp16
+        column: building_totalbedrooms
+      - table: diss.gp16
+        column: building_noofunits
+      - table: diss.gp16
+        column: building_propertylandusestndcode
+
+  - name: add-tract-to-gp16
+    depends_on: [setbacks/load-gp16, tracts]
+    commands:
+      - type: sql
+        file: add-tract-to-gp16.sql
+    outputs:
+      - table: diss.gp16
+        column: tract
+
+  # Load tracts (needed for visualization)
+  - name: tracts-dl
+    commands:
+      - type: sh
+        code: |
+          curl -o ../../data/ca_tracts.zip https://www2.census.gov/geo/tiger/TIGER2019/TRACT/tl_2019_06_tract.zip
+          unzip ../../data/ca_tracts.zip -d ../../data/
+    outputs:
+      - file: ../../data/ca_tracts.zip
+      - file: ../../data/tl_2019_06_tract.shp
+
+  - name: tracts
+    depends_on: [tracts-dl]
+    commands:
+      - type: sh
+        code: shp2pgsql -s 4269:4326 -G ../../data/tl_2019_06_tract.shp diss.ca_tracts | psql
+    outputs:
+      - table: diss.ca_tracts
+
+  # Load high quality transit areas
+  # https://gisdata-scag.opendata.arcgis.com/datasets/43e6fef395d041c09deaeb369a513ca1_1
+  - name: hqta-dl
+    commands:
+      - type: sh
+        code: |
+          curl -o ../../data/hqta.zip https://opendata.arcgis.com/datasets/43e6fef395d041c09deaeb369a513ca1_1.zip
+          unzip ../../data/hqta.zip -d ../../data
+    outputs:
+      - file: ../../data/hqta.zip
+
+  - name: hqta
+    depends_on: [hqta-dl]
+    commands:
+      - type: sh
+        code: shp2pgsql -s 4326 -G "../../data/High_Quality_Transit_Areas__HQTA__2045_%E2%80%93_SCAG_Region" diss.hqta | psql
+    outputs:
+      - table: diss.hqta
+
+  # split up the hqta to speed up index queries
+  - name: hqta-split
+    depends_on: [hqta]
+    commands:
+      - type: sql
+        file: hqta-split.sql
+    outputs:
+      - table: diss.hqta_split
+
+  - name: add-hqta-to-gp16
+    depends_on: [hqta-split, setbacks/load-gp16]
+    commands:
+      - type: sql
+        file: add-hqta-to-gp16.sql
+    outputs:
+      - table: diss.gp16
+        column: hqta

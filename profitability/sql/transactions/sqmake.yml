@@ -1,0 +1,10 @@
+# load data for the transaction forecasting model
+
+tasks:
+  - name: load-ztrans
+    desc: Load ZTrans transaction data
+    commands:
+      - type: sh
+        code: python ztrans-to-postgres.py        
+    outputs:
+      - table: diss.ztrans

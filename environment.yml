@@ -1,0 +1,43 @@
+dependencies:
+  - python>=3.8
+  - numpy
+  - pandas
+  - scipy
+  - statsmodels
+  - pyarrow
+  - matplotlib
+  - jupyter
+  - jupyterlab
+  - descartes
+  - sqlalchemy
+  - psycopg2
+  - openpyxl
+  - geoalchemy2
+  - tqdm
+  - black
+  - pytest
+  - pip
+  - libpysal
+  - geos
+  - dask
+  - pyyaml>=5.3.0,<6
+  - rtree
+  - mapclassify
+  - scikit-learn
+  - tabulate
+  - lxml
+  - xlrd
+  - numba
+  - pip:
+  #   # Geopandas from Conda forces python downgrade
+    - geopandas
+    - shapely
+    - census
+    - cenpy
+    - openmatrix
+    #- blink1
+    - biogeme
+    - partridge
+    - factor_analyzer
+    # rasterio from conda incompatible with py38
+    #- rasterio
